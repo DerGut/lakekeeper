@@ -1,7 +1,7 @@
 use chrono::Utc;
 use iceberg_ext::catalog::rest::ErrorModel;
 use itertools::{izip, Itertools};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::{
@@ -45,16 +45,16 @@ pub(crate) async fn list_statistics(
         "Listing stats for project: '{project:?}', warehouse_filter: '{warehouse_filter:?}', returning full stats: '{get_all}', interval: {interval:?}, start: {from:?}, end: {until:?}",
     );
 
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
         SELECT timestamp,
-               array_agg(matched_path) as "matched_path!: Vec<EndpointFlat>",
-               array_agg(status_code) as "status_code!",
-               array_agg(count) as "count!",
-               array_agg(es.warehouse_id) as "warehouse_id!: Vec<Option<Uuid>>",
-               array_agg(warehouse_name) as "warehouse_name!: Vec<Option<String>>",
-               array_agg(es.created_at) as "created_at!",
-               array_agg(es.updated_at) as "updated_at!: Vec<Option<chrono::DateTime<Utc>>>"
+               array_agg(matched_path) as "matched_path",
+               array_agg(status_code) as "status_code",
+               array_agg(count) as "count",
+               array_agg(es.warehouse_id) as "warehouse_id",
+               array_agg(warehouse_name) as "warehouse_name",
+               array_agg(es.created_at) as "created_at",
+               array_agg(es.updated_at) as "updated_at"
         FROM endpoint_statistics es
         LEFT JOIN warehouse w ON es.warehouse_id = w.warehouse_id
         WHERE es.project_id = $1
@@ -65,13 +65,13 @@ pub(crate) async fn list_statistics(
         group by timestamp
         order by timestamp desc
         "#,
-        project.as_str(),
-        warehouse_filter,
-        get_all,
-        status_codes.as_deref(),
-        from,
-        until,
     )
+    .bind(project.as_str())
+    .bind(warehouse_filter)
+    .bind(get_all)
+    .bind(status_codes.as_deref())
+    .bind(from)
+    .bind(until)
     .fetch_all(conn)
     .await
     .map_err(|e| {
@@ -82,15 +82,15 @@ pub(crate) async fn list_statistics(
     let (timestamps, called_endpoints): (Vec<_>, Vec<_>) = row
         .into_iter()
         .map(|r| {
-            let ts = r.timestamp;
+            let ts: chrono::DateTime<Utc> = r.try_get("timestamp").expect("timestamp column exists");
             let row_stats: Vec<_> = izip!(
-                r.matched_path,
-                r.status_code,
-                r.count,
-                r.warehouse_id,
-                r.warehouse_name,
-                r.created_at,
-                r.updated_at
+                r.try_get::<Vec<EndpointFlat>, _>("matched_path").expect("matched_path column exists"),
+                r.try_get::<Vec<i32>, _>("status_code").expect("status_code column exists"),
+                r.try_get::<Vec<i64>, _>("count").expect("count column exists"),
+                r.try_get::<Vec<Option<Uuid>>, _>("warehouse_id").expect("warehouse_id column exists"),
+                r.try_get::<Vec<Option<String>>, _>("warehouse_name").expect("warehouse_name column exists"),
+                r.try_get::<Vec<chrono::DateTime<Utc>>, _>("created_at").expect("created_at column exists"),
+                r.try_get::<Vec<Option<chrono::DateTime<Utc>>>, _>("updated_at").expect("updated_at column exists")
             )
             .map(
                 |(

@@ -14,14 +14,14 @@ pub(crate) async fn patch(
         old_checksum,
         new_checksum
     );
-    let q = sqlx::query!(
+    let q = sqlx::query(
         r#"UPDATE _sqlx_migrations
            SET checksum = $1
            WHERE version = $2 AND checksum = $3"#,
-        new_checksum.as_ref(),
-        version,
-        old_checksum.as_ref()
     )
+    .bind(new_checksum.as_ref())
+    .bind(version)
+    .bind(old_checksum.as_ref())
     .execute(&mut **trx)
     .await?;
     if q.rows_affected() > 1 {

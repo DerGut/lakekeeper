@@ -1,4 +1,5 @@
 use iceberg_ext::catalog::rest::ErrorModel;
+use sqlx::Row;
 
 use crate::{
     implementations::postgres::dbutils::DBErrorHandler,
@@ -13,7 +14,7 @@ pub(super) async fn get_or_set_server_id<
     connection: E,
 ) -> anyhow::Result<ServerId> {
     let server_id = ServerId::new_random();
-    let existing: uuid::Uuid = sqlx::query_scalar!(
+    let existing: uuid::Uuid = sqlx::query_scalar(
         r#"
         WITH inserted AS (
             INSERT INTO server (single_row, server_id, open_for_bootstrap, terms_accepted)
@@ -21,13 +22,13 @@ pub(super) async fn get_or_set_server_id<
             ON CONFLICT (single_row) DO NOTHING
             RETURNING server_id
         )
-        SELECT server_id as "server_id!" FROM inserted
+        SELECT server_id FROM inserted
         UNION ALL
-        SELECT server_id as "server_id!" FROM server
+        SELECT server_id FROM server
         LIMIT 1
         "#,
-        *server_id,
     )
+    .bind(*server_id)
     .fetch_one(connection)
     .await
     .map_err(|e| e.into_error_model("Error getting or setting server_id".to_string()))?;
@@ -42,7 +43,7 @@ pub(super) async fn get_validation_data<
 >(
     connection: E,
 ) -> std::result::Result<ServerInfo, ErrorModel> {
-    let server = sqlx::query!(
+    let server = sqlx::query(
         r#"
         SELECT
             server_id, open_for_bootstrap, terms_accepted
@@ -65,9 +66,9 @@ pub(super) async fn get_validation_data<
     let server = server.into_iter().next();
     if let Some(server) = server {
         Ok(ServerInfo {
-            server_id: server.server_id.into(),
-            open_for_bootstrap: server.open_for_bootstrap,
-            terms_accepted: server.terms_accepted,
+            server_id: server.try_get::<uuid::Uuid, _>("server_id").map_err(|e| e.into_error_model("Failed to get server_id".to_string()))?.into(),
+            open_for_bootstrap: server.try_get("open_for_bootstrap").map_err(|e| e.into_error_model("Failed to get open_for_bootstrap".to_string()))?,
+            terms_accepted: server.try_get("terms_accepted").map_err(|e| e.into_error_model("Failed to get terms_accepted".to_string()))?,
         })
     } else {
         Err(ErrorModel::failed_dependency(
@@ -83,15 +84,15 @@ pub(super) async fn bootstrap<'e, 'c: 'e, E: sqlx::Executor<'c, Database = sqlx:
     connection: E,
 ) -> Result<bool> {
     // The table has a restriction that only one row can exist
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         UPDATE server
         SET open_for_bootstrap = false, terms_accepted = $1
         WHERE server.open_for_bootstrap = true
         returning server_id
         "#,
-        terms_accepted,
     )
+    .bind(terms_accepted)
     .fetch_one(connection)
     .await;
 

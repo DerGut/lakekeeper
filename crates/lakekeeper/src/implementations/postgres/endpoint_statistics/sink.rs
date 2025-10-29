@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use fxhash::FxHashSet;
 use itertools::Itertools;
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -149,7 +149,7 @@ impl PostgresStatisticsSink {
 
         tracing::debug!("Inserting '{final_count}' aggregated stats records (reduced from '{endpoint_calls_total}' raw datapoints)");
 
-        sqlx::query!(r#"INSERT INTO endpoint_statistics (project_id, warehouse_id, matched_path, status_code, count, timestamp)
+        sqlx::query(r#"INSERT INTO endpoint_statistics (project_id, warehouse_id, matched_path, status_code, count, timestamp)
                         SELECT
                             project_id,
                             warehouse,
@@ -165,13 +165,13 @@ impl PostgresStatisticsSink {
                                 $5::BIGINT[]
                             ) AS u(project_id, warehouse, uri, status_code, cnt)
                         ON CONFLICT (project_id, warehouse_id, matched_path, status_code, timestamp)
-                            DO UPDATE SET count = endpoint_statistics.count + EXCLUDED.count"#,
-                projects.as_slice(),
-                warehouses.as_slice() as _,
-                &uris as _,
-                &status_codes,
-                &counts
-            ).execute(&mut *conn).await.map_err(|e| {
+                            DO UPDATE SET count = endpoint_statistics.count + EXCLUDED.count"#)
+                .bind(projects.as_slice())
+                .bind(warehouses.as_slice() as &[Option<Uuid>])
+                .bind(&uris as &[EndpointFlat])
+                .bind(&status_codes)
+                .bind(&counts)
+            .execute(&mut *conn).await.map_err(|e| {
             tracing::error!("Failed to insert stats: {e}, lost stats: {stats:?}");
             e.into_error_model("failed to insert stats")
         })?;
@@ -190,12 +190,12 @@ async fn resolve_projects(
 ) -> crate::api::Result<FxHashSet<ProjectId>> {
     let projects = stats.keys().map(ToString::to_string).collect_vec();
     tracing::debug!("Resolving '{}' project ids.", projects.len());
-    let resolved_projects: FxHashSet<ProjectId> = sqlx::query!(
-        r#"SELECT true as "exists!", project_id
+    let resolved_projects: FxHashSet<ProjectId> = sqlx::query(
+        r#"SELECT true as "exists", project_id
                FROM project
                WHERE project_id = ANY($1::text[])"#,
-        &projects
     )
+    .bind(&projects)
     .fetch_all(&mut **conn)
     .await
     .map_err(|e| {
@@ -204,8 +204,8 @@ async fn resolve_projects(
     })?
     .into_iter()
     .filter_map(|p| {
-        p.exists
-            .then_some(ProjectId::try_new(p.project_id))
+        p.try_get::<bool, _>("exists").ok()?
+            .then_some(ProjectId::try_new(p.try_get::<String, _>("project_id").ok()?))
             .transpose()
             .inspect_err(|e| {
                 tracing::error!("Failed to parse project id from db: {e}");
@@ -236,15 +236,15 @@ async fn resolve_warehouses(
         .unique()
         .unzip();
 
-    Ok(sqlx::query!(
+    Ok(sqlx::query(
         r#"SELECT project_id, warehouse_name, warehouse_id
                FROM warehouse
                WHERE (project_id, warehouse_name) IN (
                    Select * FROM unnest($1::text[], $2::text[]) as u(project_id, warehouse_name)
                )"#,
-        &projects,
-        &warehouse_idents
     )
+    .bind(&projects)
+    .bind(&warehouse_idents)
     .fetch_all(&mut **conn)
     .await
     .map_err(|e| {
@@ -252,6 +252,11 @@ async fn resolve_warehouses(
         e.into_error_model("failed to fetch warehouse ids")
     })?
     .into_iter()
-    .map(|w| ((w.project_id, w.warehouse_name), w.warehouse_id))
+    .filter_map(|w| {
+        Some((
+            (w.try_get::<String, _>("project_id").ok()?, w.try_get::<String, _>("warehouse_name").ok()?),
+            w.try_get::<Uuid, _>("warehouse_id").ok()?
+        ))
+    })
     .collect::<HashMap<_, _>>())
 }

@@ -2,7 +2,7 @@ use std::{collections::HashMap, ops::Deref, sync::Arc};
 
 use iceberg::TableIdent;
 use itertools::izip;
-use sqlx::types::Json;
+use sqlx::{types::Json, Row};
 use uuid::Uuid;
 
 use super::dbutils::DBErrorHandler;
@@ -49,22 +49,22 @@ pub(crate) async fn get_namespace_by_id<
     namespace_id: NamespaceId,
     connection: E,
 ) -> std::result::Result<Option<Namespace>, CatalogGetNamespaceError> {
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
-        SELECT 
-            namespace_name as "namespace_name: Vec<String>",
+        SELECT
+            namespace_name,
             n.warehouse_id,
             n.protected,
-            namespace_properties as "properties: Json<Option<HashMap<String, String>>>",
+            namespace_properties as "properties",
             n.updated_at
         FROM namespace n
         INNER JOIN warehouse w ON w.warehouse_id = $1
         WHERE n.warehouse_id = $1 AND n.namespace_id = $2
         AND w.status = 'active'
         "#,
-        *warehouse_id,
-        *namespace_id
     )
+    .bind(*warehouse_id)
+    .bind(*namespace_id)
     .fetch_one(connection)
     .await;
 
@@ -80,15 +80,15 @@ pub(crate) async fn get_namespace_by_id<
 
     Ok(Some(Namespace {
         namespace_ident: parse_namespace_identifier_from_vec(
-            &row.namespace_name,
+            &row.try_get::<Vec<String>, _>("namespace_name").map_err(|e| e.into_catalog_backend_error())?,
             warehouse_id,
             Some(namespace_id),
         )?,
-        protected: row.protected,
-        properties: row.properties.deref().clone().map(Arc::new),
+        protected: row.try_get("protected").map_err(|e| e.into_catalog_backend_error())?,
+        properties: row.try_get::<Json<Option<HashMap<String, String>>>, _>("properties").map_err(|e| e.into_catalog_backend_error())?.deref().clone().map(Arc::new),
         namespace_id,
-        warehouse_id: row.warehouse_id.into(),
-        updated_at: row.updated_at,
+        warehouse_id: row.try_get::<Uuid, _>("warehouse_id").map_err(|e| e.into_catalog_backend_error())?.into(),
+        updated_at: row.try_get("updated_at").map_err(|e| e.into_catalog_backend_error())?,
     }))
 }
 
@@ -101,22 +101,22 @@ pub(crate) async fn get_namespace_by_name<
     namespace: &NamespaceIdent,
     connection: E,
 ) -> std::result::Result<Option<Namespace>, CatalogGetNamespaceError> {
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
-        SELECT 
+        SELECT
             n.namespace_id,
             n.warehouse_id,
             n.protected,
-            namespace_properties as "properties: Json<Option<HashMap<String, String>>>",
+            namespace_properties as "properties",
             n.updated_at
         FROM namespace n
         INNER JOIN warehouse w ON w.warehouse_id = $1
         WHERE n.warehouse_id = $1 AND n.namespace_name = $2
         AND w.status = 'active'
         "#,
-        *warehouse_id,
-        &**namespace
     )
+    .bind(*warehouse_id)
+    .bind(&**namespace)
     .fetch_one(connection)
     .await;
 
@@ -132,11 +132,11 @@ pub(crate) async fn get_namespace_by_name<
 
     Ok(Some(Namespace {
         namespace_ident: namespace.clone(),
-        protected: row.protected,
-        properties: row.properties.deref().clone().map(Arc::new),
-        namespace_id: row.namespace_id.into(),
-        warehouse_id: row.warehouse_id.into(),
-        updated_at: row.updated_at,
+        protected: row.try_get("protected").map_err(|e| e.into_catalog_backend_error())?,
+        properties: row.try_get::<Json<Option<HashMap<String, String>>>, _>("properties").map_err(|e| e.into_catalog_backend_error())?.deref().clone().map(Arc::new),
+        namespace_id: row.try_get::<Uuid, _>("namespace_id").map_err(|e| e.into_catalog_backend_error())?.into(),
+        warehouse_id: row.try_get::<Uuid, _>("warehouse_id").map_err(|e| e.into_catalog_backend_error())?.into(),
+        updated_at: row.try_get("updated_at").map_err(|e| e.into_catalog_backend_error())?,
     }))
 }
 
@@ -181,14 +181,14 @@ pub(crate) async fn list_namespaces(
         // Get all namespaces where the "name" array has
         // length(parent) + 1 elements, and the first length(parent)
         // elements are equal to parent.
-        sqlx::query!(
+        sqlx::query(
             r#"
             SELECT
                 n.namespace_id,
-                "namespace_name" as "namespace_name: Vec<String>",
+                "namespace_name",
                 n.created_at,
                 n.protected,
-                namespace_properties as "properties: Json<Option<HashMap<String, String>>>",
+                namespace_properties as "properties",
                 n.updated_at
             FROM namespace n
             INNER JOIN warehouse w ON w.warehouse_id = $1
@@ -201,37 +201,37 @@ pub(crate) async fn list_namespaces(
             ORDER BY n.created_at, n.namespace_id ASC
             LIMIT $6
             "#,
-            *warehouse_id,
-            parent_len,
-            &*parent,
-            token_ts,
-            token_id,
-            page_size
         )
+        .bind(*warehouse_id)
+        .bind(parent_len)
+        .bind(&*parent)
+        .bind(token_ts)
+        .bind(token_id)
+        .bind(page_size)
         .fetch_all(&mut **transaction)
         .await
         .map_err(super::dbutils::DBErrorHandler::into_catalog_backend_error)?
         .into_iter()
         .map(|r| {
             (
-                r.namespace_id,
-                r.namespace_name,
-                r.created_at,
-                r.protected,
-                r.properties.deref().clone(),
-                r.updated_at,
+                r.try_get::<Uuid, _>("namespace_id").expect("namespace_id column exists"),
+                r.try_get::<Vec<String>, _>("namespace_name").expect("namespace_name column exists"),
+                r.try_get("created_at").expect("created_at column exists"),
+                r.try_get("protected").expect("protected column exists"),
+                r.try_get::<Json<Option<HashMap<String, String>>>, _>("properties").expect("properties column exists").deref().clone(),
+                r.try_get("updated_at").expect("updated_at column exists"),
             )
         })
         .collect()
     } else {
-        sqlx::query!(
+        sqlx::query(
             r#"
             SELECT
                 n.namespace_id,
-                "namespace_name" as "namespace_name: Vec<String>",
+                "namespace_name",
                 n.created_at,
                 n.protected,
-                namespace_properties as "properties: Json<Option<HashMap<String, String>>>",
+                namespace_properties as "properties",
                 n.updated_at
             FROM namespace n
             INNER JOIN warehouse w ON w.warehouse_id = $1
@@ -242,23 +242,23 @@ pub(crate) async fn list_namespaces(
             ORDER BY n.created_at, n.namespace_id ASC
             LIMIT $4
             "#,
-            *warehouse_id,
-            token_ts,
-            token_id,
-            page_size
         )
+        .bind(*warehouse_id)
+        .bind(token_ts)
+        .bind(token_id)
+        .bind(page_size)
         .fetch_all(&mut **transaction)
         .await
         .map_err(super::dbutils::DBErrorHandler::into_catalog_backend_error)?
         .into_iter()
         .map(|r| {
             (
-                r.namespace_id,
-                r.namespace_name,
-                r.created_at,
-                r.protected,
-                r.properties.deref().clone(),
-                r.updated_at,
+                r.try_get::<Uuid, _>("namespace_id").expect("namespace_id column exists"),
+                r.try_get::<Vec<String>, _>("namespace_name").expect("namespace_name column exists"),
+                r.try_get("created_at").expect("created_at column exists"),
+                r.try_get("protected").expect("protected column exists"),
+                r.try_get::<Json<Option<HashMap<String, String>>>, _>("properties").expect("properties column exists").deref().clone(),
+                r.try_get("updated_at").expect("updated_at column exists"),
             )
         })
         .collect()
@@ -312,7 +312,7 @@ pub(crate) async fn create_namespace(
         properties,
     } = request;
 
-    let r = sqlx::query!(
+    let r = sqlx::query(
         r#"
         INSERT INTO namespace (warehouse_id, namespace_id, namespace_name, namespace_properties)
         (
@@ -325,13 +325,13 @@ pub(crate) async fn create_namespace(
         ))
         RETURNING namespace_id, updated_at
         "#,
-        *warehouse_id,
-        *namespace_id,
-        &*namespace,
-        serde_json::to_value(properties.clone()).map_err(|e| {
-            NamespacePropertiesSerializationError::new(warehouse_id, namespace.clone(), e)
-        })?
     )
+    .bind(*warehouse_id)
+    .bind(*namespace_id)
+    .bind(&*namespace)
+    .bind(serde_json::to_value(properties.clone()).map_err(|e| {
+        NamespacePropertiesSerializationError::new(warehouse_id, namespace.clone(), e)
+    })?)
     .fetch_one(&mut **transaction)
     .await
     .map_err(|e| match e {
@@ -364,7 +364,7 @@ pub(crate) async fn create_namespace(
         protected: false,
         namespace_id,
         warehouse_id,
-        updated_at: r.updated_at,
+        updated_at: r.try_get("updated_at").map_err(|e| e.into_catalog_backend_error())?,
     })
 }
 
@@ -379,7 +379,7 @@ pub(crate) async fn drop_namespace(
     }: NamespaceDropFlags,
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> std::result::Result<NamespaceDropInfo, CatalogNamespaceDropError> {
-    let info = sqlx::query!(r#"
+    let info = sqlx::query(r#"
         WITH namespace_info AS (
             SELECT namespace_name, namespace_id, protected
             FROM namespace
@@ -403,25 +403,25 @@ pub(crate) async fn drop_namespace(
             WHERE t.entity_id = ANY (SELECT tabular_id FROM tabulars) AND t.warehouse_id = $1 AND t.entity_type in ('table', 'view')
         )
         SELECT
-            ni.protected AS "is_protected!",
-            ni.namespace_name AS "namespace_name: Vec<String>",
-            EXISTS (SELECT 1 FROM child_namespaces WHERE protected = true) AS "has_protected_namespaces!",
-            EXISTS (SELECT 1 FROM tabulars WHERE protected = true) AS "has_protected_tabulars!",
-            EXISTS (SELECT 1 FROM tasks WHERE task_status = 'running' AND queue_name = 'tabular_expiration') AS "has_running_expiration!",
-            ARRAY(SELECT tabular_id FROM tabulars where deleted_at is NULL) AS "child_tabulars!",
-            ARRAY(SELECT to_jsonb(namespace_name) FROM tabulars where deleted_at is NULL) AS "child_tabulars_namespace_names!: Vec<serde_json::Value>",
-            ARRAY(SELECT table_name FROM tabulars where deleted_at is NULL) AS "child_tabulars_table_names!",
-            ARRAY(SELECT fs_protocol FROM tabulars where deleted_at is NULL) AS "child_tabular_fs_protocol!",
-            ARRAY(SELECT fs_location FROM tabulars where deleted_at is NULL) AS "child_tabular_fs_location!",
-            ARRAY(SELECT typ FROM tabulars where deleted_at is NULL) AS "child_tabular_typ!: Vec<TabularType>",
-            ARRAY(SELECT tabular_id FROM tabulars where deleted_at is not NULL) AS "child_tabulars_deleted!",
-            ARRAY(SELECT namespace_id FROM child_namespaces) AS "child_namespaces!",
-            ARRAY(SELECT task_id FROM tasks) AS "child_tabular_task_id!: Vec<Uuid>"
+            ni.protected AS "is_protected",
+            ni.namespace_name AS "namespace_name",
+            EXISTS (SELECT 1 FROM child_namespaces WHERE protected = true) AS "has_protected_namespaces",
+            EXISTS (SELECT 1 FROM tabulars WHERE protected = true) AS "has_protected_tabulars",
+            EXISTS (SELECT 1 FROM tasks WHERE task_status = 'running' AND queue_name = 'tabular_expiration') AS "has_running_expiration",
+            ARRAY(SELECT tabular_id FROM tabulars where deleted_at is NULL) AS "child_tabulars",
+            ARRAY(SELECT to_jsonb(namespace_name) FROM tabulars where deleted_at is NULL) AS "child_tabulars_namespace_names",
+            ARRAY(SELECT table_name FROM tabulars where deleted_at is NULL) AS "child_tabulars_table_names",
+            ARRAY(SELECT fs_protocol FROM tabulars where deleted_at is NULL) AS "child_tabular_fs_protocol",
+            ARRAY(SELECT fs_location FROM tabulars where deleted_at is NULL) AS "child_tabular_fs_location",
+            ARRAY(SELECT typ FROM tabulars where deleted_at is NULL) AS "child_tabular_typ",
+            ARRAY(SELECT tabular_id FROM tabulars where deleted_at is not NULL) AS "child_tabulars_deleted",
+            ARRAY(SELECT namespace_id FROM child_namespaces) AS "child_namespaces",
+            ARRAY(SELECT task_id FROM tasks) AS "child_tabular_task_id"
         FROM namespace_info ni
-"#,
-        *warehouse_id,
-        *namespace_id,
-    ).fetch_one(&mut **transaction).await.map_err(|e|
+"#)
+    .bind(*warehouse_id)
+    .bind(*namespace_id)
+    .fetch_one(&mut **transaction).await.map_err(|e|
         if let sqlx::Error::RowNotFound = e {
             CatalogNamespaceDropError::from(NamespaceNotFound::new(warehouse_id, namespace_id))
          } else {
@@ -429,36 +429,44 @@ pub(crate) async fn drop_namespace(
         }
     )?;
     let namespace_ident = parse_namespace_identifier_from_vec(
-        &info.namespace_name,
+        &info.try_get::<Vec<String>, _>("namespace_name").map_err(|e| e.into_catalog_backend_error())?,
         warehouse_id,
         Some(namespace_id),
     )?;
 
-    if !recursive && (!info.child_tabulars.is_empty() || !info.child_namespaces.is_empty()) {
+    let child_tabulars = info.try_get::<Vec<Uuid>, _>("child_tabulars").map_err(|e| e.into_catalog_backend_error())?;
+    let child_namespaces = info.try_get::<Vec<Uuid>, _>("child_namespaces").map_err(|e| e.into_catalog_backend_error())?;
+    let child_tabulars_deleted = info.try_get::<Vec<Uuid>, _>("child_tabulars_deleted").map_err(|e| e.into_catalog_backend_error())?;
+
+    if !recursive && (!child_tabulars.is_empty() || !child_namespaces.is_empty()) {
         return Err(
-            NamespaceNotEmpty::new(warehouse_id, namespace_ident.clone()).append_detail(format!("Contains {} tables/views, {} soft-deleted tables/views and {} child namespaces.", 
-                info.child_tabulars.len(),
-                info.child_tabulars_deleted.len(),
-                info.child_namespaces.len()
+            NamespaceNotEmpty::new(warehouse_id, namespace_ident.clone()).append_detail(format!("Contains {} tables/views, {} soft-deleted tables/views and {} child namespaces.",
+                child_tabulars.len(),
+                child_tabulars_deleted.len(),
+                child_namespaces.len()
         )
 
     ).append_detail("Use 'recursive' flag to delete all content.").into()
         );
     }
 
-    if !force && info.is_protected {
+    let is_protected = info.try_get::<bool, _>("is_protected").map_err(|e| e.into_catalog_backend_error())?;
+    if !force && is_protected {
         return Err(NamespaceProtected::new(warehouse_id, namespace_ident.clone()).into());
     }
 
-    if !force && info.has_protected_namespaces {
+    let has_protected_namespaces = info.try_get::<bool, _>("has_protected_namespaces").map_err(|e| e.into_catalog_backend_error())?;
+    if !force && has_protected_namespaces {
         return Err(ChildNamespaceProtected::new(warehouse_id, namespace_ident.clone()).into());
     }
 
-    if !force && info.has_protected_tabulars {
+    let has_protected_tabulars = info.try_get::<bool, _>("has_protected_tabulars").map_err(|e| e.into_catalog_backend_error())?;
+    if !force && has_protected_tabulars {
         return Err(ChildTabularProtected::new(warehouse_id, namespace_ident.clone()).into());
     }
 
-    if info.has_running_expiration {
+    let has_running_expiration = info.try_get::<bool, _>("has_running_expiration").map_err(|e| e.into_catalog_backend_error())?;
+    if has_running_expiration {
         return Err(NamespaceHasRunningTabularExpirations::new(
             warehouse_id,
             namespace_ident.clone(),
@@ -466,7 +474,7 @@ pub(crate) async fn drop_namespace(
         .into());
     }
 
-    let record = sqlx::query!(
+    let record = sqlx::query(
         r#"
         DELETE FROM namespace
             WHERE warehouse_id = $1
@@ -477,10 +485,10 @@ pub(crate) async fn drop_namespace(
                 AND warehouse_id = $1
             )
         "#,
-        *warehouse_id,
-        &info.child_namespaces,
-        *namespace_id,
     )
+    .bind(*warehouse_id)
+    .bind(&child_namespaces)
+    .bind(*namespace_id)
     .execute(&mut **transaction)
     .await
     .map_err(|e| match &e {
@@ -503,14 +511,14 @@ pub(crate) async fn drop_namespace(
     }
 
     Ok(NamespaceDropInfo {
-        child_namespaces: info.child_namespaces.into_iter().map(Into::into).collect(),
+        child_namespaces: child_namespaces.into_iter().map(Into::into).collect(),
         child_tables: izip!(
-            info.child_tabulars,
-            info.child_tabular_fs_protocol,
-            info.child_tabular_fs_location,
-            info.child_tabular_typ,
-            info.child_tabulars_namespace_names,
-            info.child_tabulars_table_names
+            child_tabulars,
+            info.try_get::<Vec<String>, _>("child_tabular_fs_protocol").map_err(|e| e.into_catalog_backend_error())?,
+            info.try_get::<Vec<String>, _>("child_tabular_fs_location").map_err(|e| e.into_catalog_backend_error())?,
+            info.try_get::<Vec<TabularType>, _>("child_tabular_typ").map_err(|e| e.into_catalog_backend_error())?,
+            info.try_get::<Vec<serde_json::Value>, _>("child_tabulars_namespace_names").map_err(|e| e.into_catalog_backend_error())?,
+            info.try_get::<Vec<String>, _>("child_tabulars_table_names").map_err(|e| e.into_catalog_backend_error())?
         )
         .map(
             |(tabular_id, protocol, fs_location, typ, ns_name, t_name)| {
@@ -529,7 +537,7 @@ pub(crate) async fn drop_namespace(
         )
         .collect::<std::result::Result<Vec<_>, _>>()?,
         open_tasks: info
-            .child_tabular_task_id
+            .try_get::<Vec<Uuid>, _>("child_tabular_task_id").map_err(|e| e.into_catalog_backend_error())?
             .into_iter()
             .map(TaskId::from)
             .collect(),
@@ -589,18 +597,18 @@ pub(crate) async fn set_namespace_protected(
     protect: bool,
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> std::result::Result<Namespace, CatalogSetNamespaceProtectedError> {
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
         UPDATE namespace
         SET protected = $1
         WHERE namespace_id = $2 AND warehouse_id IN (
             SELECT warehouse_id FROM warehouse WHERE status = 'active'
         )
-        returning protected, updated_at, namespace_name as "namespace_name: Vec<String>", namespace_properties as "properties: Json<Option<HashMap<String, String>>>"
+        returning protected, updated_at, namespace_name, namespace_properties as "properties"
         "#,
-        protect,
-        *namespace_id
     )
+    .bind(protect)
+    .bind(*namespace_id)
     .fetch_one(&mut **transaction)
     .await
     .map_err(|e| {
@@ -614,15 +622,15 @@ pub(crate) async fn set_namespace_protected(
 
     Ok(Namespace {
         namespace_ident: parse_namespace_identifier_from_vec(
-            &row.namespace_name,
+            &row.try_get::<Vec<String>, _>("namespace_name").map_err(|e| e.into_catalog_backend_error())?,
             warehouse_id,
             Some(namespace_id),
         )?,
-        protected: row.protected,
-        properties: row.properties.deref().clone().map(Arc::new),
+        protected: row.try_get("protected").map_err(|e| e.into_catalog_backend_error())?,
+        properties: row.try_get::<Json<Option<HashMap<String, String>>>, _>("properties").map_err(|e| e.into_catalog_backend_error())?.deref().clone().map(Arc::new),
         namespace_id,
         warehouse_id,
-        updated_at: row.updated_at,
+        updated_at: row.try_get("updated_at").map_err(|e| e.into_catalog_backend_error())?,
     })
 }
 
@@ -635,7 +643,7 @@ pub(crate) async fn update_namespace_properties(
     let properties = serde_json::to_value(properties)
         .map_err(|e| NamespacePropertiesSerializationError::new(warehouse_id, namespace_id, e))?;
 
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"
         UPDATE namespace
         SET namespace_properties = $1
@@ -643,12 +651,12 @@ pub(crate) async fn update_namespace_properties(
         AND warehouse_id IN (
             SELECT warehouse_id FROM warehouse WHERE status = 'active'
         )
-        RETURNING namespace_name as "namespace_name: Vec<String>", protected, updated_at, namespace_properties as "properties: Json<Option<HashMap<String, String>>>"
+        RETURNING namespace_name, protected, updated_at, namespace_properties as "properties"
         "#,
-        properties,
-        *warehouse_id,
-        *namespace_id
     )
+    .bind(properties)
+    .bind(*warehouse_id)
+    .bind(*namespace_id)
     .fetch_one(&mut **transaction)
     .await
     .map_err(|e| match e {
@@ -658,15 +666,15 @@ pub(crate) async fn update_namespace_properties(
 
     Ok(Namespace {
         namespace_ident: parse_namespace_identifier_from_vec(
-            &row.namespace_name,
+            &row.try_get::<Vec<String>, _>("namespace_name").map_err(|e| e.into_catalog_backend_error())?,
             warehouse_id,
             Some(namespace_id),
         )?,
-        protected: row.protected,
-        properties: row.properties.deref().clone().map(Arc::new),
+        protected: row.try_get("protected").map_err(|e| e.into_catalog_backend_error())?,
+        properties: row.try_get::<Json<Option<HashMap<String, String>>>, _>("properties").map_err(|e| e.into_catalog_backend_error())?.deref().clone().map(Arc::new),
         namespace_id,
         warehouse_id,
-        updated_at: row.updated_at,
+        updated_at: row.try_get("updated_at").map_err(|e| e.into_catalog_backend_error())?,
     })
 }
 
