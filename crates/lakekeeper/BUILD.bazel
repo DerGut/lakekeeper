@@ -1,0 +1,16 @@
+# This BUILD file tells cargo-bazel to use files from the workspace root
+# for sqlx offline mode metadata. This is needed because sqlx compile-time
+# macros require .sqlx metadata files that live at the workspace root in
+# Cargo workspaces.
+
+filegroup(
+    name = "sqlx_workspace_metadata",
+    srcs = glob(["../../.sqlx/**/*.json"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "migrations_dir",
+    srcs = glob(["migrations/**/*"]),
+    visibility = ["//visibility:public"],
+)
